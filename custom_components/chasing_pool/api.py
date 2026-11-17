@@ -209,6 +209,9 @@ class ChasingRestClient:
     async def async_list_devices(self) -> list[dict]:
         all_devices = []
         seen_ids = set()
+        last_error: Exception | None = None
+        any_success = False
+
         # Query known device types: 2 (Hydro 6), 1 (Hydro 4), 0, 3, 4
         for t in [2, 1, 0, 3, 4]:
             url = f"{REST_BASE_URL}/v1/users/clients?type={t}"
@@ -217,20 +220,44 @@ class ChasingRestClient:
                     if resp.status == 401:
                         raise ChasingAuthError("clients returned HTTP 401")
                     if resp.status != 200:
+                        last_error = ChasingApiError(
+                            f"clients query {url} returned HTTP {resp.status}"
+                        )
                         continue
                     body = await resp.json()
-                    if body.get("code") == 0:
-                        data = body.get("data")
-                        if isinstance(data, list):
-                            for d in data:
-                                cid = d.get("clientId")
-                                if cid and cid not in seen_ids:
-                                    seen_ids.add(cid)
-                                    all_devices.append(d)
+                    if body.get("code") != 0:
+                        msg = str(body.get("msg", "clients failed"))
+                        if (
+                            "token" in msg.lower()
+                            or "auth" in msg.lower()
+                            or "login" in msg.lower()
+                        ):
+                            raise ChasingAuthError(msg)
+                        last_error = ChasingApiError(msg)
+                        continue
+                    any_success = True
+                    data = body.get("data")
+                    if isinstance(data, list):
+                        for d in data:
+                            cid = d.get("clientId")
+                            if cid and cid not in seen_ids:
+                                seen_ids.add(cid)
+                                all_devices.append(d)
             except ChasingAuthError:
                 raise
-            except Exception as e:
+            except (aiohttp.ClientError, TimeoutError, OSError) as e:
                 _LOGGER.warning("CHASING exception querying %s: %s", url, e)
+                last_error = e
+            except Exception as e:
+                _LOGGER.warning("CHASING unexpected exception querying %s: %s", url, e)
+                last_error = e
+
+        if not any_success and last_error is not None:
+            if isinstance(last_error, ChasingApiError):
+                raise last_error
+            raise ChasingApiError(
+                f"Unable to discover CHASING devices: {last_error}"
+            ) from last_error
 
         return all_devices
 

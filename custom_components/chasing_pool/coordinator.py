@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import copy
 import logging
 from typing import Any
 
@@ -33,7 +34,9 @@ from .const import (
     CONF_TOKEN,
     DOMAIN,
     ERROR_CODE_FILTER_FULL,
+    MODE_RETRIEVE,
     PRESENCE_UPDATE_SECONDS,
+    STATUS_CLEANING,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -247,6 +250,8 @@ class ChasingPoolCoordinator(DataUpdateCoordinator[DeviceStatus | None]):
                 "Wake it / reconnect Wi-Fi, then try again."
             )
 
+        backup = copy.copy(self.data) if self.data is not None else None
+
         # Optimistically update local state immediately so UI changes are instant
         # without waiting for the robot's 60-second periodic telemetry heartbeat.
         if self.data is not None:
@@ -254,6 +259,10 @@ class ChasingPoolCoordinator(DataUpdateCoordinator[DeviceStatus | None]):
                 self.data.shape = int(data["shape"])
             if "mode" in data:
                 self.data.mode = int(data["mode"])
+                # If returning to base, the robot enters cleaning status (status 1) to retrieve.
+                # Update status so is_returning is immediately True even if previously paused.
+                if int(data["mode"]) == MODE_RETRIEVE:
+                    self.data.status = STATUS_CLEANING
             if "zone" in data:
                 self.data.zone = int(data["zone"])
             if "lightStrip" in data:
@@ -267,4 +276,7 @@ class ChasingPoolCoordinator(DataUpdateCoordinator[DeviceStatus | None]):
         try:
             await self.hass.async_add_executor_job(self.client.publish_command, data)
         except ChasingApiError as err:
+            if backup is not None:
+                self.data = backup
+                self.async_set_updated_data(self.data)
             raise HomeAssistantError(str(err)) from err
