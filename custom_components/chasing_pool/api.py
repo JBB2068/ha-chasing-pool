@@ -209,7 +209,8 @@ class ChasingRestClient:
     async def async_list_devices(self) -> list[dict]:
         all_devices = []
         seen_ids = set()
-        last_error: Exception | None = None
+        errors: dict[int, Exception] = {}
+        transport_errors: set[int] = set()
         any_success = False
 
         # Query known device types: 2 (Hydro 6), 1 (Hydro 4), 0, 3, 4
@@ -220,9 +221,10 @@ class ChasingRestClient:
                     if resp.status == 401:
                         raise ChasingAuthError("clients returned HTTP 401")
                     if resp.status != 200:
-                        last_error = ChasingApiError(
+                        errors[t] = ChasingApiError(
                             f"clients query {url} returned HTTP {resp.status}"
                         )
+                        transport_errors.add(t)
                         continue
                     body = await resp.json()
                     if body.get("code") != 0:
@@ -233,7 +235,7 @@ class ChasingRestClient:
                             or "login" in msg.lower()
                         ):
                             raise ChasingAuthError(msg)
-                        last_error = ChasingApiError(msg)
+                        errors[t] = ChasingApiError(msg)
                         continue
                     any_success = True
                     data = body.get("data")
@@ -245,19 +247,34 @@ class ChasingRestClient:
                                 all_devices.append(d)
             except ChasingAuthError:
                 raise
-            except (aiohttp.ClientError, TimeoutError, OSError) as e:
+            except (aiohttp.ClientError, TimeoutError, OSError, ValueError) as e:
                 _LOGGER.warning("CHASING exception querying %s: %s", url, e)
-                last_error = e
-            except Exception as e:
-                _LOGGER.warning("CHASING unexpected exception querying %s: %s", url, e)
-                last_error = e
+                errors[t] = e
+                transport_errors.add(t)
 
-        if not any_success and last_error is not None:
-            if isinstance(last_error, ChasingApiError):
-                raise last_error
-            raise ChasingApiError(
-                f"Unable to discover CHASING devices: {last_error}"
-            ) from last_error
+        if errors:
+            # A failed lookup must not look like an absent device. Type 1 (Hydro 4)
+            # failing in any way raises, as before Hydro 6 support. Type 2
+            # (Hydro 6) raises on transport failures only, because an API-level
+            # "no such type" answer is expected for Hydro 4 accounts. Types 0, 3
+            # and 4 are exploratory and never fatal on their own.
+            fatal = next(
+                (
+                    t
+                    for t in (1, 2)
+                    if t in errors and (t == 1 or t in transport_errors)
+                ),
+                None,
+            )
+            if fatal is None and not any_success:
+                fatal = next(iter(errors))
+            if fatal is not None:
+                err = errors[fatal]
+                if isinstance(err, ChasingApiError):
+                    raise err
+                raise ChasingApiError(
+                    f"Unable to discover CHASING devices: {err}"
+                ) from err
 
         return all_devices
 

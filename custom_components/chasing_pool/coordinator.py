@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from datetime import timedelta
-import copy
 import logging
 from typing import Any
 
@@ -250,33 +249,47 @@ class ChasingPoolCoordinator(DataUpdateCoordinator[DeviceStatus | None]):
                 "Wake it / reconnect Wi-Fi, then try again."
             )
 
-        backup = copy.copy(self.data) if self.data is not None else None
+        updates: dict[str, int] = {}
+        if "shape" in data:
+            updates["shape"] = int(data["shape"])
+        if "mode" in data:
+            updates["mode"] = int(data["mode"])
+            # If returning to base, the robot enters cleaning status (status 1) to
+            # retrieve. Update status so is_returning is immediately True even if
+            # previously paused.
+            if updates["mode"] == MODE_RETRIEVE:
+                updates["status"] = STATUS_CLEANING
+        if "zone" in data:
+            updates["zone"] = int(data["zone"])
+        if "lightStrip" in data:
+            updates["light_strip"] = int(data["lightStrip"])
+        if "minutes" in data:
+            updates["minutes"] = int(data["minutes"])
+        if "status" in data:
+            updates["status"] = int(data["status"])
 
         # Optimistically update local state immediately so UI changes are instant
         # without waiting for the robot's 60-second periodic telemetry heartbeat.
-        if self.data is not None:
-            if "shape" in data:
-                self.data.shape = int(data["shape"])
-            if "mode" in data:
-                self.data.mode = int(data["mode"])
-                # If returning to base, the robot enters cleaning status (status 1) to retrieve.
-                # Update status so is_returning is immediately True even if previously paused.
-                if int(data["mode"]) == MODE_RETRIEVE:
-                    self.data.status = STATUS_CLEANING
-            if "zone" in data:
-                self.data.zone = int(data["zone"])
-            if "lightStrip" in data:
-                self.data.light_strip = int(data["lightStrip"])
-            if "minutes" in data:
-                self.data.minutes = int(data["minutes"])
-            if "status" in data:
-                self.data.status = int(data["status"])
-            self.async_set_updated_data(self.data)
+        optimistic = self.data
+        previous: dict[str, int] = {}
+        if optimistic is not None:
+            for attr, value in updates.items():
+                previous[attr] = getattr(optimistic, attr)
+                setattr(optimistic, attr, value)
+            self.async_set_updated_data(optimistic)
 
         try:
             await self.hass.async_add_executor_job(self.client.publish_command, data)
         except ChasingApiError as err:
-            if backup is not None:
-                self.data = backup
-                self.async_set_updated_data(self.data)
+            # Only undo this command's own changes. If telemetry replaced
+            # self.data meanwhile, it is newer than our snapshot; leave it alone.
+            # Skip any field another command has changed since.
+            if optimistic is not None and self.data is optimistic:
+                reverted = False
+                for attr, old in previous.items():
+                    if getattr(optimistic, attr) == updates[attr]:
+                        setattr(optimistic, attr, old)
+                        reverted = True
+                if reverted:
+                    self.async_set_updated_data(optimistic)
             raise HomeAssistantError(str(err)) from err
