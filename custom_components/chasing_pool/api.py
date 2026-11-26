@@ -456,11 +456,5 @@ class ChasingMqttClient:
         info = self._client.publish(self._topic_set, json.dumps(payload), qos=1)
         if info.rc != mqtt.MQTT_ERR_SUCCESS:
             raise ChasingApiError(f"MQTT publish failed, rc={info.rc}")
-        alt_prefix = "Hydro4" if self._topic_prefix == "Hydro6" else "Hydro6"
-        alt_topic = f"{alt_prefix}/{self._device_id}/property/set"
-        try:
-            self._client.publish(alt_topic, json.dumps(payload), qos=1)
-        except Exception:
-            pass
         # Nudge a status refresh so entities catch the new state quickly.
         self.request_status()
